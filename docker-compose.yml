@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_USER: market
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-market}
+      POSTGRES_DB: market
+    ports: ["127.0.0.1:${POSTGRES_PORT:-55432}:5432"]
+    volumes: ["market_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U market -d market"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgres://market:${POSTGRES_PASSWORD:-market}@db:5432/market?sslmode=disable
+    depends_on:
+      db: {condition: service_healthy}
+  api:
+    build: .
+    environment:
+      LISTEN_ADDR: :8080
+      DATABASE_URL: postgres://market:${POSTGRES_PASSWORD:-market}@db:5432/market?sslmode=disable
+      RENTCAST_API_KEY: ${RENTCAST_API_KEY:-}
+      RENTCAST_MONTHLY_BUDGET: ${RENTCAST_MONTHLY_BUDGET:-50}
+      MAX_REQUESTS_PER_RUN: ${MAX_REQUESTS_PER_RUN:-4}
+    ports: ["127.0.0.1:${API_PORT:-18080}:8080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+  web:
+    build: ./web
+    environment:
+      API_URL: http://api:8080
+    ports: ["127.0.0.1:${WEB_PORT:-3001}:3000"]
+    depends_on: [api]
+volumes:
+  market_data:

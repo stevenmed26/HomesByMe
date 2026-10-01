@@ -26,6 +26,10 @@ go.work.sum
 
 # env file
 .env
+node_modules/
+.next/
+.cache/
+*.tsbuildinfo
 
 # Editor/IDE
 # .idea/
