@@ -27,6 +27,7 @@ services:
       RENTCAST_API_KEY: ${RENTCAST_API_KEY:-}
       RENTCAST_MONTHLY_BUDGET: ${RENTCAST_MONTHLY_BUDGET:-50}
       MAX_REQUESTS_PER_RUN: ${MAX_REQUESTS_PER_RUN:-4}
+      STALE_AFTER_HOURS: ${STALE_AFTER_HOURS:-72}
     ports: ["127.0.0.1:${API_PORT:-18080}:8080"]
     depends_on:
       migrate: {condition: service_completed_successfully}

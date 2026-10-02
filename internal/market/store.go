@@ -3,14 +3,20 @@ package market
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"log/slog"
+
 	"time"
 )
 
 type Store struct{ DB *pgxpool.Pool }
+
+var ErrMonthlyBudget = errors.New("monthly request budget exhausted")
+
+type requestScope struct{ RunID, SearchID int64 }
+type requestScopeKey struct{}
 
 func (s *Store) ReserveRequest(ctx context.Context, endpoint string, budget int) (int64, error) {
 	tx, e := s.DB.Begin(ctx)
@@ -27,12 +33,25 @@ func (s *Store) ReserveRequest(ctx context.Context, endpoint string, budget int)
 		return 0, e
 	}
 	if count >= budget {
-		return 0, fmt.Errorf("monthly request budget exhausted (%d/%d)", count, budget)
+		return 0, fmt.Errorf("%w (%d/%d)", ErrMonthlyBudget, count, budget)
 	}
 	var id int64
-	e = tx.QueryRow(ctx, "INSERT INTO provider_api_usage(provider,endpoint) VALUES('rentcast',$1) RETURNING id", endpoint).Scan(&id)
+	var runID, searchID *int64
+	if scope, ok := ctx.Value(requestScopeKey{}).(requestScope); ok {
+		runID = &scope.RunID
+		searchID = &scope.SearchID
+	}
+	e = tx.QueryRow(ctx, "INSERT INTO provider_api_usage(provider,endpoint,run_id,search_id) VALUES('rentcast',$1,$2,$3) RETURNING id", endpoint, runID, searchID).Scan(&id)
 	if e != nil {
 		return 0, e
+	}
+	if runID != nil {
+		if _, e = tx.Exec(ctx, "UPDATE ingestion_runs SET request_count=request_count+1,updated_at=now() WHERE id=$1", *runID); e != nil {
+			return 0, e
+		}
+		if _, e = tx.Exec(ctx, "UPDATE ingestion_searches SET request_count=request_count+1,updated_at=now() WHERE id=$1", *searchID); e != nil {
+			return 0, e
+		}
 	}
 	return id, tx.Commit(ctx)
 }
@@ -45,6 +64,15 @@ func (s *Store) Save(ctx context.Context, r Record, at time.Time) error {
 		return e
 	}
 	defer tx.Rollback(ctx)
+	if e = s.saveTx(ctx, tx, r, at, nil); e != nil {
+		return e
+	}
+	return tx.Commit(ctx)
+}
+
+// saveTx is shared by direct fixture imports and the atomic run apply checkpoint.
+func (s *Store) saveTx(ctx context.Context, tx pgx.Tx, r Record, at time.Time, runID *int64) error {
+	var e error
 	if _, e = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(743202)"); e != nil {
 		return e
 	}
@@ -89,7 +117,7 @@ func (s *Store) Save(ctx context.Context, r Record, at time.Time) error {
 		return e
 	}
 	var oid int64
-	e = tx.QueryRow(ctx, `INSERT INTO listing_observations(listing_id,observed_at,status,price,days_on_market,provider_modified_at,listed_date,property_snapshot,raw_response) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, lid, at, r.Status, r.Price, r.DOM, r.Modified, r.Listed, snapshot, []byte(r.Raw)).Scan(&oid)
+	e = tx.QueryRow(ctx, `INSERT INTO listing_observations(listing_id,observed_at,status,price,days_on_market,provider_modified_at,listed_date,property_snapshot,raw_response,ingestion_run_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, lid, at, r.Status, r.Price, r.DOM, r.Modified, r.Listed, snapshot, []byte(r.Raw), runID).Scan(&oid)
 	if e != nil {
 		return e
 	}
@@ -107,76 +135,5 @@ func (s *Store) Save(ctx context.Context, r Record, at time.Time) error {
 	if e != nil {
 		return e
 	}
-	return tx.Commit(ctx)
-}
-func (s *Store) Ingest(ctx context.Context, p ListingProvider, maxRequests int) error {
-	// A session lock prevents interleaved runs and inconsistent observation ordering.
-	conn, e := s.DB.Acquire(ctx)
-	if e != nil {
-		return e
-	}
-	defer conn.Release()
-	var locked bool
-	if e = conn.QueryRow(ctx, "SELECT pg_try_advisory_lock(743203)").Scan(&locked); e != nil {
-		return e
-	}
-	if !locked {
-		return fmt.Errorf("another ingestion is running")
-	}
-	defer conn.Exec(context.Background(), "SELECT pg_advisory_unlock(743203)")
-	rows, e := s.DB.Query(ctx, "SELECT coalesce(city,''),coalesce(state,''),coalesce(zip_code,'') FROM search_areas WHERE enabled ORDER BY id")
-	if e != nil {
-		return e
-	}
-	var areas []Area
-	for rows.Next() {
-		var a Area
-		if e = rows.Scan(&a.City, &a.State, &a.ZIP); e != nil {
-			rows.Close()
-			return e
-		}
-		areas = append(areas, a)
-	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
-		return e
-	}
-	if len(areas) == 0 {
-		return fmt.Errorf("configure at least one enabled search area")
-	}
-	seen := map[string]bool{}
-	calls := 0
-	saved := 0
-	for _, a := range areas {
-		for _, status := range []string{"Active", "Inactive"} {
-			for offset := 0; ; offset += 500 {
-				if calls >= maxRequests {
-					return fmt.Errorf("run request cap reached (%d); partial history retained; narrow search areas or increase MAX_REQUESTS_PER_RUN", calls)
-				}
-				calls++
-				slog.Info("provider_request", "city", a.City, "zip", a.ZIP, "status", status, "offset", offset)
-				records, err := p.SearchListings(ctx, a, status, offset)
-				if err != nil {
-					return err
-				}
-				for _, r := range records {
-					key := r.Provider + ":" + ListingKey(r)
-					if seen[key] {
-						continue
-					}
-					if err = s.Save(ctx, r, time.Now().UTC()); err != nil {
-						return err
-					}
-					seen[key] = true
-					saved++
-				}
-				if len(records) < 500 {
-					break
-				}
-			}
-		}
-	}
-	slog.Info("ingestion_complete", "requests", calls, "observations", saved)
 	return nil
 }

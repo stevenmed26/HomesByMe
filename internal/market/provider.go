@@ -11,9 +11,13 @@ import (
 	"time"
 )
 
-type Area struct{ City, State, ZIP string }
+type Area struct {
+	City  string `json:"city"`
+	State string `json:"state"`
+	ZIP   string `json:"zip"`
+}
 type ListingProvider interface {
-	SearchListings(context.Context, Area, string, int) ([]Record, error)
+	SearchPage(context.Context, Area, string, int) ([]byte, error)
 	GetListing(context.Context, string) (Record, error)
 	NormalizeListing(json.RawMessage) (Record, error)
 }
@@ -59,13 +63,13 @@ func (p *RentCast) request(ctx context.Context, path string) ([]byte, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("RentCast HTTP %d (request %d)", resp.StatusCode, id)
 	}
-	if !json.Valid(b) {
-		return nil, fmt.Errorf("invalid provider JSON")
-	}
 	_, err = p.Store.DB.Exec(ctx, "UPDATE provider_api_usage SET successful=true WHERE id=$1", id)
 	return b, err
 }
-func (p *RentCast) SearchListings(ctx context.Context, a Area, status string, offset int) ([]Record, error) {
+func (p *RentCast) SearchPage(ctx context.Context, a Area, status string, offset int) ([]byte, error) {
+	if err := a.Validate(); err != nil {
+		return nil, err
+	}
 	q := url.Values{"status": {status}, "limit": {"500"}, "offset": {fmt.Sprint(offset)}}
 	if a.ZIP != "" {
 		q.Set("zipCode", a.ZIP)
@@ -73,7 +77,13 @@ func (p *RentCast) SearchListings(ctx context.Context, a Area, status string, of
 		q.Set("city", a.City)
 		q.Set("state", a.State)
 	}
-	b, err := p.request(ctx, "/listings/sale?"+q.Encode())
+	return p.request(ctx, "/listings/sale?"+q.Encode())
+}
+
+// Convenience method for callers that do not need quarantine. Durable ingestion
+// always uses SearchPage and stores the bytes before decoding any record.
+func (p *RentCast) SearchListings(ctx context.Context, a Area, status string, offset int) ([]Record, error) {
+	b, err := p.SearchPage(ctx, a, status, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +109,9 @@ func (p *RentCast) GetListing(ctx context.Context, id string) (Record, error) {
 	return p.NormalizeListing(b)
 }
 func (p *RentCast) NormalizeListing(b json.RawMessage) (Record, error) {
+	if strings.Contains(string(b), `\u0000`) {
+		return Record{}, fmt.Errorf("record contains unsupported NUL escape")
+	}
 	var x struct {
 		ID           string     `json:"id"`
 		Address      string     `json:"addressLine1"`

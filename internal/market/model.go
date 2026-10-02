@@ -3,6 +3,7 @@ package market
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -58,11 +59,28 @@ func ListingKey(r Record) string {
 	return "address:" + AddressKey(r.Property)
 }
 func Validate(r Record) error {
-	if strings.TrimSpace(r.Property.Address) == "" || r.Property.ZIP == "" && (r.Property.City == "" || r.Property.State == "") {
+	if strings.TrimSpace(r.Property.Address) == "" || strings.TrimSpace(r.Property.ZIP) == "" && (strings.TrimSpace(r.Property.City) == "" || strings.TrimSpace(r.Property.State) == "") {
 		return fmt.Errorf("listing lacks a usable address")
 	}
 	if r.Status != "ACTIVE" && r.Status != "INACTIVE" {
 		return fmt.Errorf("unsupported RentCast status %q", r.Status)
+	}
+	for name, value := range map[string]*float64{"price": r.Price, "bedrooms": r.Property.Beds, "bathrooms": r.Property.Baths, "square feet": r.Property.Sqft, "lot size": r.Property.Lot} {
+		if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0) {
+			return fmt.Errorf("invalid %s", name)
+		}
+	}
+	if r.Property.Latitude != nil && (math.IsNaN(*r.Property.Latitude) || math.Abs(*r.Property.Latitude) > 90) {
+		return fmt.Errorf("invalid latitude")
+	}
+	if r.Property.Longitude != nil && (math.IsNaN(*r.Property.Longitude) || math.Abs(*r.Property.Longitude) > 180) {
+		return fmt.Errorf("invalid longitude")
+	}
+	if r.DOM != nil && (*r.DOM < 0 || *r.DOM > 2147483647) {
+		return fmt.Errorf("invalid days on market")
+	}
+	if r.Property.Year != nil && (*r.Property.Year < 0 || *r.Property.Year > 9999) {
+		return fmt.Errorf("invalid year built")
 	}
 	return nil
 }

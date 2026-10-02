@@ -40,21 +40,13 @@ func run() error {
 	}
 	switch command {
 	case "migrate":
-		b, e := os.ReadFile("migrations/001_initial.sql")
-		if e != nil {
-			return e
+		return s.Migrate(ctx, "migrations")
+	case "ingest", "resume":
+		provider := &market.RentCast{Store: s, Key: os.Getenv("RENTCAST_API_KEY"), Budget: number("RENTCAST_MONTHLY_BUDGET", 50)}
+		if command == "resume" {
+			return s.Resume(ctx, provider, number("MAX_REQUESTS_PER_RUN", 4))
 		}
-		tx, e := db.Begin(ctx)
-		if e != nil {
-			return e
-		}
-		defer tx.Rollback(ctx)
-		if _, e = tx.Exec(ctx, string(b)); e != nil {
-			return e
-		}
-		return tx.Commit(ctx)
-	case "ingest":
-		return s.Ingest(ctx, &market.RentCast{Store: s, Key: os.Getenv("RENTCAST_API_KEY"), Budget: number("RENTCAST_MONTHLY_BUDGET", 50)}, number("MAX_REQUESTS_PER_RUN", 4))
+		return s.Ingest(ctx, provider, number("MAX_REQUESTS_PER_RUN", 4))
 	case "fixture":
 		if os.Getenv("ALLOW_FIXTURE_IMPORT") != "true" {
 			return fmt.Errorf("fixture import requires ALLOW_FIXTURE_IMPORT=true; use a separate test database")

@@ -42,11 +42,7 @@ func TestDatabasePipeline(t *testing.T) {
 	}
 	defer testDB.Close()
 	s := &Store{DB: testDB}
-	migration, e := os.ReadFile(filepath.Join("..", "..", "migrations", "001_initial.sql"))
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = testDB.Exec(ctx, string(migration)); e != nil {
+	if e = s.Migrate(ctx, filepath.Join("..", "..", "migrations")); e != nil {
 		t.Fatal(e)
 	}
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
